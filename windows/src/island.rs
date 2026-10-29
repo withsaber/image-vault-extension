@@ -116,6 +116,14 @@ pub enum Act {
     NpToggle,
     NpNext,
     ClipCard(String),
+    ClipCopy(String),
+    ClipExpand(String),
+    ClipExpCopy,
+    ClipExpClose,
+    ClipExpText,
+    BulkGroup,
+    /// The inline folder-rename field (its text area).
+    FolderRename(Rect),
     Grid,
     PreviewPrev,
     PreviewNext,
@@ -808,19 +816,20 @@ pub fn close_search(app: &mut App) {
 }
 
 pub fn query_changed(app: &mut App) {
+    views::clip_collapse_now();
     let q = app.island.search.text.clone();
     crate::tray::set_filter(app, &q, app.tray.sort);
     app.island.dirty = true;
 }
 
-fn schedule_blink(app: &mut App) {
+pub fn schedule_blink(app: &mut App) {
     if app.island.blink.is_some() {
         return;
     }
     app.island.blink = Some(ui::after(0.5, || {
         crate::app::with(|a| {
             a.island.blink = None;
-            if a.island.search_focused && a.island.state == State::Expanded {
+            if (a.island.search_focused || a.tray.renaming.is_some()) && a.island.state == State::Expanded {
                 a.island.dirty = true;
                 a.request_frame();
                 schedule_blink(a);
@@ -889,6 +898,22 @@ pub fn drop_event(app: &mut App, target: Target, phase: Phase, data: Option<&IDa
                 }
             }
             dragdrop::effect_none()
+        }
+        // Our own tiles dragged within the grid: onto a folder or another image.
+        Target::Island if app.tray.dragging_out && data.map(dragdrop::is_ours).unwrap_or(phase != Phase::Enter && phase != Phase::Drop) => {
+            let lp = pt((_p.x - app.island.win.left) as f32 / app.island.scale, (_p.y - app.island.win.top) as f32 / app.island.scale);
+            match phase {
+                Phase::Enter | Phase::Over => {
+                    if crate::tray::internal_drag_over(app, lp) { dragdrop::effect_copy() } else { dragdrop::effect_none() }
+                }
+                Phase::Leave => {
+                    crate::tray::internal_drag_leave(app);
+                    dragdrop::effect_none()
+                }
+                Phase::Drop => {
+                    if crate::tray::internal_drop(app, lp) { dragdrop::effect_copy() } else { dragdrop::effect_none() }
+                }
+            }
         }
         Target::Island => match phase {
             Phase::Enter => {
@@ -1177,6 +1202,12 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> Option<L
         }
         WM_CHAR => {
             let c = w.0 as u32;
+            if app.tray.renaming.is_some() && app.island.state == State::Expanded {
+                if let Some(ch) = char::from_u32(c) {
+                    crate::tray::rename_char(app, ch);
+                }
+                return Some(LRESULT(0));
+            }
             if app.island.search_focused && app.island.state == State::Expanded {
                 if let Some(ch) = char::from_u32(c) {
                     if app.island.search.char(ch) {
@@ -1235,8 +1266,17 @@ fn ime_position(app: &mut App) {
 fn mouse_down(app: &mut App, p: Pt, clicks: u32) {
     let hit = hit_at(app, p);
     let (ctrl, shift) = mods();
+    // Clicking anywhere but the rename field keeps the new name.
+    if app.tray.renaming.is_some() && !matches!(hit.as_ref().map(|h| &h.act), Some(Act::FolderRename(_))) {
+        crate::tray::commit_rename(app);
+    }
     if let Some(h) = &hit {
         match &h.act {
+            Act::FolderRename(field) => {
+                crate::tray::rename_press(app, *field, p, shift, clicks);
+                app.island.pressed = Some((h.id, h.act.clone()));
+                return;
+            }
             Act::SearchField => {
                 app.island.search_focused = true;
                 if let Some(field) = views::search_field_rect(app) {
@@ -1259,6 +1299,12 @@ fn mouse_down(app: &mut App, p: Pt, clicks: u32) {
                 views::clip_press(id, p);
                 app.island.pressed = Some((h.id, h.act.clone()));
                 app.island.dirty = true;
+                return;
+            }
+            Act::ClipExpText => {
+                app.island.search_focused = false;
+                views::clip_exp_press(app, p, clicks, shift);
+                app.island.pressed = Some((h.id, h.act.clone()));
                 return;
             }
             _ => {
@@ -1305,6 +1351,8 @@ fn drag(app: &mut App, p: Pt) {
             Act::ClipCard(id) => {
                 views::clip_drag(app, &id, p);
             }
+            Act::ClipExpText => views::clip_exp_drag(app, p),
+            Act::FolderRename(field) => crate::tray::rename_drag(app, field, p),
             _ => {}
         }
         return;
@@ -1321,6 +1369,7 @@ fn mouse_up(app: &mut App, p: Pt) {
             Act::SearchField => {
                 app.island.search.mouse_up();
             }
+            Act::FolderRename(_) => crate::tray::rename_release(app),
             Act::NpWave => {
                 if let Some(h) = app.island.hits.iter().find(|h| h.act == Act::NpWave).cloned() {
                     crate::nowplaying::scrub(app, h.rect, p, true);
@@ -1367,6 +1416,7 @@ fn click(app: &mut App, act: Act) {
             crate::tray::set_filter(app, &q, next);
         }
         Act::BulkCopy => crate::tray::copy_selection(app),
+        Act::BulkGroup => crate::tray::group_selection(app),
         Act::BulkText => crate::tray::copy_text_selection(app),
         Act::BulkReveal => reveal_action(app),
         Act::BulkDelete => crate::tray::delete_selection(app),
@@ -1385,6 +1435,10 @@ fn click(app: &mut App, act: Act) {
                 crate::tray::preview_click(app, p);
             }
         }
+        Act::ClipCopy(id) => views::clip_click(app, &id),
+        Act::ClipExpand(id) => views::clip_expand(app, &id),
+        Act::ClipExpCopy => views::clip_exp_copy(app),
+        Act::ClipExpClose => views::clip_collapse(app),
         _ => {}
     }
 }
@@ -1408,6 +1462,9 @@ fn key_down(app: &mut App, vk: u16) -> bool {
         return false;
     }
     app.tip.dismiss();
+    if crate::tray::rename_key(app, vk) {
+        return true;
+    }
     if app.island.search_focused {
         match VIRTUAL_KEY(vk) {
             VK_RETURN => {
@@ -1442,6 +1499,10 @@ fn key_down(app: &mut App, vk: u16) -> bool {
         }
     }
     if app.island.tab == Tab::Clipboard {
+        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        if views::clip_exp_key(app, vk, ctrl) {
+            return true;
+        }
         if VIRTUAL_KEY(vk) == VK_ESCAPE {
             collapse(app);
             return true;

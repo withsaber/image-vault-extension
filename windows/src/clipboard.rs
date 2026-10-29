@@ -144,6 +144,9 @@ pub fn copy_items(items: &[VaultItem]) {
     let png = imaging::png_bytes(&path);
     let raw = imaging::decode_path(&path);
     let jpeg = if item.mime.as_deref() == Some("image/jpeg") { std::fs::read(&path).ok() } else { None };
+    // The original bytes too, so animation and vectors survive in apps that take them.
+    let gif = if item.mime.as_deref() == Some("image/gif") { std::fs::read(&path).ok() } else { None };
+    let svg = if item.mime.as_deref() == Some("image/svg+xml") { std::fs::read(&path).ok() } else { None };
     if !open() {
         return;
     }
@@ -158,6 +161,13 @@ pub fn copy_items(items: &[VaultItem]) {
     }
     if let Some(j) = jpeg {
         put(format_id("JFIF"), &j);
+    }
+    if let Some(g) = gif {
+        put(format_id("GIF"), &g);
+        put(format_id("image/gif"), &g);
+    }
+    if let Some(v) = svg {
+        put(format_id("image/svg+xml"), &v);
     }
     put(format_id(MARKER), &[1]);
     close();
@@ -272,12 +282,19 @@ pub fn read() -> Option<Snapshot> {
         if let Some(b) = get_bytes(CF_UNICODETEXT.0 as u32) {
             s.text = Some(utf16_bytes(&b));
         }
-        for name in ["PNG", "image/png"] {
+        // SVG and GIF first, so vectors and animation survive.
+        if let Some(b) = get_bytes(format_id("image/svg+xml")) {
+            let b: Vec<u8> = b.into_iter().take_while(|c| *c != 0).collect();
+            if imaging::is_svg(&b) {
+                s.image = Some(b);
+            }
+        }
+        for name in ["GIF", "image/gif", "PNG", "image/png"] {
             if s.image.is_none() {
                 s.image = get_bytes(format_id(name));
             }
         }
-        for name in ["JFIF", "image/jpeg", "image/gif", "image/webp"] {
+        for name in ["JFIF", "image/jpeg", "image/webp"] {
             if s.image.is_none() {
                 s.image = get_bytes(format_id(name));
             }

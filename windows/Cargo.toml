@@ -1,6 +1,6 @@
 [package]
 name = "imagevault"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2024"
 description = "Image Vault for Windows — a Dynamic-Island-style image vault"
 
@@ -9,6 +9,7 @@ name = "ImageVault"
 path = "src/main.rs"
 
 [dependencies]
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"

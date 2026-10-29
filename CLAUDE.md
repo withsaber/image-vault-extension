@@ -19,3 +19,7 @@ A feature or fix isn't done until it works on Mac **and** Windows.
 ## Recording
 
 Add each change to `KNOWLEDGEBASE.md` §2 (timeline) and §9 (current state, including what's verified on each platform).
+
+## Decisions: show options, let the user choose
+
+Whenever a request involves a real choice (approach, tool, design, scope, trade-off), don't pick silently. Show the options side by side, as a table or comparison of what each one gains and costs, mark the recommendation, and let the user choose before going ahead. Small mechanical things (formatting, obvious fixes) don't need this.

@@ -27,6 +27,9 @@ impl Position {
 fn yes() -> bool {
     true
 }
+fn five() -> u32 {
+    5
+}
 fn ben() -> Vec<String> {
     vec!["ben".into()]
 }
@@ -56,6 +59,9 @@ pub struct Settings {
     pub ocr_hot_key_code: u32,
     #[serde(default)]
     pub ocr_hot_key_modifiers: u32,
+    /// How long a screenshot's preview card stays (seconds); 0 = until closed.
+    #[serde(default = "five")]
+    pub shot_preview_seconds: u32,
     #[serde(default)]
     pub shot_hot_key_code: u32,
     #[serde(default)]

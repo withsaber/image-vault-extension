@@ -170,7 +170,13 @@ fn html_img(d: &IDataObject) -> Option<String> {
 }
 
 fn image_data(d: &IDataObject) -> Option<Vec<u8>> {
-    for name in ["PNG", "image/png", "JFIF", "image/jpeg", "image/gif", "image/webp"] {
+    if let Some(b) = get_bytes(d, "image/svg+xml") {
+        let b: Vec<u8> = b.into_iter().take_while(|c| *c != 0).collect();
+        if imaging::is_svg(&b) {
+            return Some(b);
+        }
+    }
+    for name in ["GIF", "image/gif", "PNG", "image/png", "JFIF", "image/jpeg", "image/webp"] {
         if let Some(b) = get_bytes(d, name) {
             if !b.is_empty() {
                 return Some(b);
@@ -201,7 +207,7 @@ pub fn looks_like_image(d: &IDataObject) -> bool {
             return true;
         }
     }
-    for name in ["PNG", "image/png", "JFIF", "image/jpeg", "image/gif", "image/webp"] {
+    for name in ["PNG", "image/png", "JFIF", "image/jpeg", "image/gif", "GIF", "image/webp", "image/svg+xml"] {
         if has(d, format_id(name)) {
             return true;
         }

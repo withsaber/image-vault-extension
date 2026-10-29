@@ -73,11 +73,21 @@ pub fn wic() -> Option<IWICImagingFactory> {
     })
 }
 
+/// SVG markup, also with a BOM, XML prolog, DOCTYPE or leading comments.
 pub fn is_svg(data: &[u8]) -> bool {
-    let head = &data[..data.len().min(512)];
+    let head = &data[..data.len().min(4096)];
     let Ok(s) = std::str::from_utf8(head).or_else(|e| std::str::from_utf8(&head[..e.valid_up_to()])) else { return false };
     let s = s.trim_start_matches('\u{feff}').trim().to_lowercase();
-    s.starts_with("<svg") || (s.starts_with("<?xml") && s.contains("<svg"))
+    s.starts_with("<svg") || ((s.starts_with("<?xml") || s.starts_with("<!")) && s.contains("<svg"))
+}
+
+/// Copied text that is a whole SVG document (Imaging.isSVG(text:)).
+pub fn is_svg_text(text: &str) -> bool {
+    let t = text.trim();
+    if t.len() >= 2_000_000 || !(t.to_lowercase().contains("</svg>") || t.ends_with("/>")) {
+        return false;
+    }
+    is_svg(t.as_bytes())
 }
 
 fn stream_from(data: &[u8]) -> Option<IStream> {
@@ -270,6 +280,187 @@ pub fn decode_bytes(data: &[u8], max_px: Option<u32>) -> Option<Raw> {
     let dec = decoder_bytes(&f, data)?;
     let frame = unsafe { dec.GetFrame(0).ok()? };
     frame_raw(&f, &frame, max_px, None)
+}
+
+fn meta_u32(reader: &IWICMetadataQueryReader, name: PCWSTR) -> Option<u32> {
+    unsafe {
+        let mut v = PROPVARIANT::default();
+        reader.GetMetadataByName(name, &mut v).ok()?;
+        let vt = v.Anonymous.Anonymous.vt;
+        let val = match vt.0 {
+            17 => Some(v.Anonymous.Anonymous.Anonymous.bVal as u32),
+            18 => Some(v.Anonymous.Anonymous.Anonymous.uiVal as u32),
+            19 => Some(v.Anonymous.Anonymous.Anonymous.ulVal),
+            2 => Some(v.Anonymous.Anonymous.Anonymous.iVal as u32),
+            3 => Some(v.Anonymous.Anonymous.Anonymous.lVal as u32),
+            _ => None,
+        };
+        let _ = PropVariantClear(&mut v);
+        val
+    }
+}
+
+fn resize_raw(f: &IWICImagingFactory, raw: &Raw, w: u32, h: u32) -> Option<Raw> {
+    if w == raw.w && h == raw.h {
+        return Some(raw.clone());
+    }
+    unsafe {
+        let bmp = f.CreateBitmapFromMemory(raw.w, raw.h, &GUID_WICPixelFormat32bppPBGRA, raw.w * 4, &raw.px).ok()?;
+        let sc = f.CreateBitmapScaler().ok()?;
+        sc.Initialize(&bmp, w, h, WICBitmapInterpolationModeFant).ok()?;
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        sc.CopyPixels(std::ptr::null(), w * 4, &mut px).ok()?;
+        Some(Raw { w, h, px })
+    }
+}
+
+/// Animated GIF frames for a tile (Imaging.gifFrames): composited onto the
+/// logical screen (offsets + disposal), scaled so the longest side ≤ `side`,
+/// at most 400 frames. Delays in seconds (≈0 → 0.1 s, like browsers).
+/// None for still images.
+pub fn gif_frames(path: &Path, side: u32) -> Option<(Vec<Raw>, Vec<f32>)> {
+    let f = wic()?;
+    let dec = decoder_path(&f, path)?;
+    if container(&dec) != GUID_ContainerFormatGif {
+        return None;
+    }
+    let count = unsafe { dec.GetFrameCount().ok()? };
+    if count < 2 {
+        return None;
+    }
+    let first = unsafe { dec.GetFrame(0).ok()? };
+    let (mut fw, mut fh) = (0u32, 0u32);
+    unsafe { first.GetSize(&mut fw, &mut fh).ok()? };
+    let (mut sw, mut sh) = (fw, fh);
+    if let Ok(r) = unsafe { dec.GetMetadataQueryReader() } {
+        if let (Some(w), Some(h)) = (meta_u32(&r, w!("/logscrdesc/Width")), meta_u32(&r, w!("/logscrdesc/Height"))) {
+            if w > 0 && h > 0 {
+                (sw, sh) = (w, h);
+            }
+        }
+    }
+    if sw == 0 || sh == 0 || sw > 8192 || sh > 8192 {
+        return None;
+    }
+    // Longest side ≤ `side` (GIFFrames: 240 px), at most 400 frames.
+    let k = (side as f64 / sw.max(sh) as f64).min(1.0);
+    let (tw, th) = (((sw as f64 * k).round() as u32).max(1), ((sh as f64 * k).round() as u32).max(1));
+    let mut canvas = vec![0u8; (sw * sh * 4) as usize];
+    let mut frames = Vec::new();
+    let mut delays = Vec::new();
+    for i in 0..count.min(400) {
+        let Ok(frame) = (unsafe { dec.GetFrame(i) }) else { continue };
+        let reader = unsafe { frame.GetMetadataQueryReader().ok() };
+        let get = |n: PCWSTR| reader.as_ref().and_then(|r| meta_u32(r, n));
+        let left = get(w!("/imgdesc/Left")).unwrap_or(0);
+        let top = get(w!("/imgdesc/Top")).unwrap_or(0);
+        let disposal = get(w!("/grctlext/Disposal")).unwrap_or(0);
+        let delay = get(w!("/grctlext/Delay")).unwrap_or(0) as f32 / 100.0;
+        let Some(fr) = frame_raw(&f, &frame, None, None) else { continue };
+        let saved = if disposal == 3 { Some(canvas.clone()) } else { None };
+        for y in 0..fr.h {
+            let cy = top + y;
+            if cy >= sh {
+                break;
+            }
+            for x in 0..fr.w {
+                let cx = left + x;
+                if cx >= sw {
+                    break;
+                }
+                let si = ((y * fr.w + x) * 4) as usize;
+                let a = fr.px[si + 3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let di = ((cy * sw + cx) * 4) as usize;
+                for c in 0..4 {
+                    let d = canvas[di + c] as u32;
+                    canvas[di + c] = (fr.px[si + c] as u32 + d * (255 - a) / 255).min(255) as u8;
+                }
+            }
+        }
+        let snap = Raw { w: sw, h: sh, px: canvas.clone() };
+        if let Some(r) = resize_raw(&f, &snap, tw, th) {
+            frames.push(r);
+            delays.push(if delay <= 0.011 { 0.1 } else { delay });
+        }
+        match disposal {
+            2 => {
+                for y in top..(top + fr.h).min(sh) {
+                    let a = ((y * sw + left.min(sw)) * 4) as usize;
+                    let b = ((y * sw + (left + fr.w).min(sw)) * 4) as usize;
+                    canvas[a..b].fill(0);
+                }
+            }
+            3 => {
+                if let Some(s) = saved {
+                    canvas = s;
+                }
+            }
+            _ => {}
+        }
+    }
+    if frames.len() > 1 { Some((frames, delays)) } else { None }
+}
+
+/// An SVG's intended size from its root `width`/`height` (or `viewBox`).
+pub fn svg_size(data: &[u8]) -> Option<(f32, f32)> {
+    let text = String::from_utf8_lossy(&data[..data.len().min(16384)]).to_string();
+    let lower = text.to_lowercase();
+    let start = lower.find("<svg")?;
+    let end = start + lower[start..].find('>')?;
+    let tag = &text[start..end];
+    let attr = |name: &str| -> Option<String> {
+        let tl = tag.to_lowercase();
+        let mut from = 0;
+        while let Some(i) = tl[from..].find(name) {
+            let at = from + i;
+            let before = tl[..at].chars().last().unwrap_or(' ');
+            let rest = tl[at + name.len()..].trim_start();
+            if before.is_whitespace() && rest.starts_with('=') {
+                let rest = rest[1..].trim_start();
+                let q = rest.chars().next()?;
+                if q == '"' || q == '\'' {
+                    let off = tag.len() - rest.len();
+                    let val = &tag[off + 1..];
+                    return val.find(q).map(|e| val[..e].to_string());
+                }
+            }
+            from = at + name.len();
+        }
+        None
+    };
+    let num = |v: String| v.trim().trim_end_matches("px").trim().parse::<f32>().ok().filter(|n| *n > 0.0);
+    if let (Some(w), Some(h)) = (attr("width").and_then(num), attr("height").and_then(num)) {
+        return Some((w, h));
+    }
+    let vb = attr("viewbox")?;
+    let parts: Vec<f32> = vb.split([' ', ',']).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect();
+    if parts.len() == 4 && parts[2] > 0.0 && parts[3] > 0.0 { Some((parts[2], parts[3])) } else { None }
+}
+
+/// Full-resolution pixels for the editor plus their scale: Retina-style
+/// screenshots record their DPI (144 dpi → 1.5×); SVGs rasterise at 2×.
+pub fn decode_for_edit(path: &Path) -> Option<(Raw, f32)> {
+    if is_svg_path(path) {
+        let data = std::fs::read(path).ok()?;
+        let (w, h) = svg_size(&data).unwrap_or((512.0, 512.0));
+        let long = w.max(h);
+        let side = (long * 2.0).clamp(256.0, 4096.0);
+        let k = side / long;
+        let raw = svg_raster(&data, ((w * k).round() as u32).max(1), ((h * k).round() as u32).max(1))?;
+        return Some((raw, 2.0));
+    }
+    let f = wic()?;
+    let dec = decoder_path(&f, path)?;
+    let frame = unsafe { dec.GetFrame(0).ok()? };
+    let (mut dx, mut dy) = (96.0f64, 96.0f64);
+    unsafe {
+        let _ = frame.GetResolution(&mut dx, &mut dy);
+    }
+    let scale = if dx > 96.5 && dx < 960.0 { (dx / 96.0) as f32 } else { 1.0 };
+    Some((frame_raw(&f, &frame, None, None)?, scale))
 }
 
 /// Pixel size without decoding.

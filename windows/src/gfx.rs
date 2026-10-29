@@ -1159,6 +1159,17 @@ impl Canvas {
         }
     }
 
+    /// A prepared layout with its top-left at `p`.
+    pub fn text_layout(&mut self, l: &IDWriteTextLayout, p: Pt, c: Color) {
+        let c = self.c(c);
+        if c.a <= 0.0 {
+            return;
+        }
+        unsafe {
+            self.g.dc.DrawTextLayout(p2(p), l, self.g.brush(c), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        }
+    }
+
     /// Multi-line wrapped text from the top of `r`, at most `lines` lines.
     pub fn text_wrapped(&mut self, s: &str, font: &Font, c: Color, r: Rect, lines: u32, align: Align) {
         let c = self.c(c);

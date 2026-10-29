@@ -169,6 +169,9 @@ pub struct Doc {
     blur_bmp: Option<(u32, ID2D1Bitmap1)>,
     rendered: Option<(u64, Raw)>,
     images: HashMap<usize, (u32, ID2D1Bitmap1)>,
+    /// The vault item this capture is (auto-saved screenshots, or a vault
+    /// image opened in the editor): saving updates it instead of adding copies.
+    pub source_item: Option<crate::vault::VaultItem>,
 }
 
 impl Doc {
@@ -184,6 +187,7 @@ impl Doc {
             blur_bmp: None,
             rendered: None,
             images: HashMap::new(),
+            source_item: None,
         }
     }
 
@@ -193,6 +197,10 @@ impl Doc {
     }
 
     pub fn name(&self) -> String {
+        if let Some(src) = &self.source_item {
+            let base = src.name.rsplit_once('.').map(|(b, _)| b).unwrap_or(&src.name);
+            return format!("{base}.png");
+        }
         format!("Screenshot {}.png", self.created)
     }
 
@@ -538,6 +546,10 @@ pub struct Preview {
     bmp: Option<(u64, u32, ID2D1Bitmap1)>,
     dirty: bool,
     shown: bool,
+    /// The pointer is over the card (pauses the countdown).
+    hovering: bool,
+    /// Bumped to cancel a scheduled auto-hide.
+    dismiss_token: u64,
 }
 
 pub struct Pin {
@@ -714,8 +726,17 @@ pub fn present(app: &mut App, doc: Doc, mon: &Monitor) {
         bmp: None,
         dirty: true,
         shown: false,
+        hovering: false,
+        dismiss_token: 0,
     });
     relayout(app, false);
+    // Every new screenshot lands on the clipboard and in the vault straight away.
+    if let Some(doc) = app.captures.docs.get_mut(&id) {
+        let raw = doc.rendered();
+        clipboard::copy_raw(&raw, 96.0 * doc.scale as f64);
+    }
+    auto_save(app, id);
+    schedule_dismiss(app, id);
     // Appear: slide in from the right while fading in.
     let k = key_id("cap.x", &id.to_string());
     app.anims.play(k, 24.0, 0.0, Curve::mac(0.28));
@@ -771,7 +792,93 @@ fn dismiss_preview(app: &mut App, i: usize) {
     });
 }
 
+/// Starts (or restarts) the card's auto-hide countdown; paused while hovered.
+fn schedule_dismiss(app: &mut App, doc: u64) {
+    let secs = app.settings.shot_preview_seconds;
+    let Some(p) = app.captures.previews.iter_mut().find(|p| p.doc == doc) else { return };
+    p.dismiss_token += 1;
+    if secs == 0 || p.hovering || p.closing {
+        return;
+    }
+    let token = p.dismiss_token;
+    ui::after(secs as f64, move || {
+        app::with(|a| {
+            if let Some(j) = a.captures.previews.iter().position(|p| p.doc == doc && p.dismiss_token == token) {
+                dismiss_preview(a, j);
+            }
+        });
+    });
+}
+
+fn set_hovering(app: &mut App, doc: u64, on: bool) {
+    let Some(p) = app.captures.previews.iter_mut().find(|p| p.doc == doc) else { return };
+    if p.hovering == on {
+        return;
+    }
+    p.hovering = on;
+    if on {
+        p.dismiss_token += 1;
+    } else {
+        schedule_dismiss(app, doc);
+    }
+}
+
+/// Any finished interaction (copy, save, text, drag, edit) closes the card.
+fn finish_interaction(app: &mut App, doc: u64, delay: f64) {
+    let Some(p) = app.captures.previews.iter_mut().find(|p| p.doc == doc) else { return };
+    p.dismiss_token += 1;
+    let token = p.dismiss_token;
+    ui::after(delay, move || {
+        app::with(|a| {
+            if let Some(j) = a.captures.previews.iter().position(|p| p.doc == doc && p.dismiss_token == token) {
+                dismiss_preview(a, j);
+            }
+        });
+    });
+}
+
 // -- actions ----------------------------------------------------------------------
+
+/// A fresh capture goes into the vault; later edits of it then update that
+/// same item instead of adding copies.
+fn auto_save(app: &mut App, id: u64) {
+    let Some(doc) = app.captures.docs.get_mut(&id) else { return };
+    let Some(png) = doc.png() else { return };
+    let name = doc.name();
+    ingest::save_async(vec![ingest::Candidate { data: png, name: Some(name), url: None }], "screenshot", move |s| {
+        app::with(|a| {
+            app::finish_ingest(a, &s);
+            if let Some(item) = s.added.first().or(s.duplicates.first()) {
+                if let Some(doc) = a.captures.docs.get_mut(&id) {
+                    if doc.source_item.is_none() {
+                        doc.source_item = Some(item.clone());
+                    }
+                }
+            }
+            let (title, detail) = if s.is_empty() {
+                ("Copied", "Couldn't save to vault".to_string())
+            } else {
+                ("Copied & saved", format!("{} in vault", a.model.items.len()))
+            };
+            island::show_activity(a, s.first.clone(), title, &detail);
+        });
+    });
+}
+
+/// Opens any vault image in the screenshot editor; Save writes back over it
+/// (GIFs and SVGs save as a new copy so the original isn't flattened).
+pub fn edit_vault_item(app: &mut App, item: &crate::vault::VaultItem) {
+    let path = crate::vault::file_path(item);
+    let Some((raw, scale)) = imaging::decode_for_edit(&path) else {
+        island::show_activity(app, None, "Can't edit this image", "");
+        return;
+    };
+    let mut doc = Doc::new(raw, scale);
+    doc.source_item = Some(item.clone());
+    let id = doc.id;
+    app.captures.docs.insert(id, doc);
+    crate::editor::open(app, id);
+}
 
 /// Copy also keeps the shot in the vault (copied images always live there).
 pub fn copy(app: &mut App, id: u64) {
@@ -785,6 +892,31 @@ pub fn save_to_vault(app: &mut App, id: u64, title: Option<&'static str>) {
     let Some(doc) = app.captures.docs.get_mut(&id) else { return };
     let Some(png) = doc.png() else { return };
     let name = doc.name();
+    let flat_only = |m: Option<&str>| m != Some("image/gif") && m != Some("image/svg+xml");
+    if let Some(source) = doc.source_item.clone().filter(|s| flat_only(s.mime.as_deref())) {
+        util::spawn("replace", move || {
+            imaging::com_init();
+            let updated = crate::vault::replace_data(&source.id, &png).ok().flatten();
+            let thumb = updated.as_ref().and_then(|u| imaging::thumbnail(&crate::vault::file_path(u), 88));
+            ui::post(move || {
+                app::with(|a| {
+                    let Some(updated) = updated else {
+                        island::show_activity(a, None, "Save failed", "");
+                        return;
+                    };
+                    if let Some(doc) = a.captures.docs.get_mut(&id) {
+                        doc.source_item = Some(updated.clone());
+                    }
+                    a.thumbs.forget(&updated.id);
+                    a.model.reload(&[]);
+                    crate::tray::model_changed(a);
+                    crate::ocr::pump(a);
+                    island::show_activity(a, thumb, title.unwrap_or("Saved"), "Updated in vault");
+                });
+            });
+        });
+        return;
+    }
     ingest::save_async(vec![ingest::Candidate { data: png, name: Some(name), url: None }], "screenshot", move |s| {
         app::with(|a| {
             app::finish_ingest(a, &s);
@@ -870,7 +1002,10 @@ fn drag_out(app: &mut App, id: u64) {
     ui::defer(move || {
         if let Some(obj) = crate::dragdrop::files_object(&[path]) {
             crate::dragdrop::set_drag_image(&obj, &img, POINT { x: img.w as i32 / 2, y: img.h as i32 / 2 });
-            crate::dragdrop::run(&obj);
+            let effect = crate::dragdrop::run(&obj);
+            if effect != crate::dragdrop::effect_none() {
+                app::with(|a| finish_interaction(a, id, 0.55));
+            }
         }
     });
 }
@@ -1210,6 +1345,11 @@ fn preview_msg(app: &mut App, i: usize, msg: u32, x: i32, y: i32) -> Option<LRES
     match msg {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_MOUSEMOVE => {
+            if !p.hovering {
+                let doc = p.doc;
+                set_hovering(app, doc, true);
+            }
+            let p = &mut app.captures.previews[i];
             let h = preview_hit(p, pnt);
             if h != p.hover {
                 p.hover = h;
@@ -1238,6 +1378,9 @@ fn preview_msg(app: &mut App, i: usize, msg: u32, x: i32, y: i32) -> Option<LRES
                     p.down = None;
                     let id = p.doc;
                     app.tip.dismiss();
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
                     drag_out(app, id);
                 }
             }
@@ -1246,7 +1389,9 @@ fn preview_msg(app: &mut App, i: usize, msg: u32, x: i32, y: i32) -> Option<LRES
         0x02A3 => {
             p.hover = None;
             p.dirty = true;
+            let doc = p.doc;
             app.tip.hover(None);
+            set_hovering(app, doc, false);
             ui::animate(true);
             Some(LRESULT(0))
         }
@@ -1270,6 +1415,11 @@ fn preview_msg(app: &mut App, i: usize, msg: u32, x: i32, y: i32) -> Option<LRES
                 p.dirty = true;
             } else if image_rect(p).contains(pnt) || grip_rect(p).contains(pnt) {
                 p.down = Some(pnt);
+                // Keep getting WM_MOUSEMOVE after a quick move leaves the small window,
+                // so the drag still starts.
+                unsafe {
+                    SetCapture(p.hwnd);
+                }
             }
             ui::animate(true);
             Some(LRESULT(0))
@@ -1279,11 +1429,16 @@ fn preview_msg(app: &mut App, i: usize, msg: u32, x: i32, y: i32) -> Option<LRES
                 let id = p.doc;
                 p.down = None;
                 edit(app, id);
+                finish_interaction(app, id, 0.1);
             }
             Some(LRESULT(0))
         }
         WM_LBUTTONUP => {
-            p.down = None;
+            if p.down.take().is_some() {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+            }
             let pressed = p.pressed.take();
             p.dirty = true;
             let id = p.doc;
@@ -1292,16 +1447,24 @@ fn preview_msg(app: &mut App, i: usize, msg: u32, x: i32, y: i32) -> Option<LRES
                     let confirm_until = util::mono() + 1.2;
                     match name {
                         "close" => dismiss_preview(app, i),
-                        "edit" => edit(app, id),
+                        "edit" => {
+                            edit(app, id);
+                            finish_interaction(app, id, 0.1);
+                        }
                         "copy" => {
                             copy(app, id);
                             app.captures.previews[i].confirm.insert("copy", confirm_until);
+                            finish_interaction(app, id, 0.55);
                         }
                         "save" => {
                             save_to_vault(app, id, None);
                             app.captures.previews[i].confirm.insert("save", confirm_until);
+                            finish_interaction(app, id, 0.55);
                         }
-                        "text" => copy_text(app, id),
+                        "text" => {
+                            copy_text(app, id);
+                            finish_interaction(app, id, 0.3);
+                        }
                         "pin" => {
                             pin(app, id, None);
                             if let Some(j) = app.captures.previews.iter().position(|p| p.doc == id) {

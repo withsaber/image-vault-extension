@@ -423,42 +423,41 @@ pub fn language_key(langs: &[String]) -> String {
 #[derive(Default)]
 pub struct Indexer {
     running: bool,
-    /// (id, language key) pairs already attempted this session.
-    tried: std::collections::HashSet<String>,
+    /// The last image read ("id|languages"), so a row that won't update
+    /// can't loop forever.
+    last: Option<String>,
 }
 
-/// OCR the next image that hasn't been read with the current pipeline.
+/// OCR the next image that hasn't been read with the current pipeline. The
+/// pick, the read and the save (one row update) all run off the UI thread,
+/// and the grid doesn't reload for it.
 pub fn pump(app: &mut crate::app::App) {
     if app.ocr.running {
         return;
     }
-    let key = language_key(&app.settings.ocr_extra_languages);
-    let next = app
-        .model
-        .items
-        .iter()
-        .find(|i| {
-            (i.ocr_version.unwrap_or(0) < VERSION || i.ocr_languages.as_deref().unwrap_or("") != key)
-                && !app.ocr.tried.contains(&format!("{}|{key}", i.id))
-        })
-        .cloned();
-    let Some(item) = next else { return };
-    app.ocr.tried.insert(format!("{}|{key}", item.id));
     app.ocr.running = true;
-    let path = crate::vault::file_path(&item);
+    let key = language_key(&app.settings.ocr_extra_languages);
     let langs = app.settings.ocr_extra_languages.clone();
+    let last = app.ocr.last.clone();
     util::spawn_low("ocr-index", move || {
         imaging::com_init();
-        let text = if path.exists() { index_text(&path, &langs) } else { String::new() };
-        crate::vault::set_ocr(&item.id, if text.is_empty() { None } else { Some(text) }, Some(VERSION), Some(key));
-        crate::ui::post(|| {
+        let next = crate::vault::next_pending_ocr(VERSION, &key).filter(|i| Some(&format!("{}|{key}", i.id)) != last.as_ref());
+        let done = next.as_ref().map(|i| format!("{}|{key}", i.id));
+        if let Some(item) = next {
+            let path = crate::vault::file_path(&item);
+            let text = if path.exists() { index_text(&path, &langs) } else { String::new() };
+            crate::vault::set_ocr(&item.id, if text.is_empty() { None } else { Some(text) }, Some(VERSION), Some(key));
+        }
+        crate::ui::post(move || {
             crate::app::with(|a| {
                 a.ocr.running = false;
-                crate::app::reload_model_if_changed(a);
-                // Give the UI a breath between images.
-                crate::ui::after(0.05, || {
-                    crate::app::with(pump);
-                });
+                if done.is_some() {
+                    a.ocr.last = done;
+                    // Give the machine a breath between images.
+                    crate::ui::after(0.05, || {
+                        crate::app::with(pump);
+                    });
+                }
             });
         });
     });

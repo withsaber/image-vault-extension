@@ -2,6 +2,7 @@
 //! menu, the clipboard / screenshot watchers and the frame clock.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 
 use windows::Win32::Foundation::*;
@@ -113,6 +114,8 @@ pub fn init_headless() {
 
 pub fn init() {
     remove_chrome_bridge();
+    vault::set_change_hook(store_changed);
+    vault::migrate_to_flat_layout();
     let settings = Settings::load();
     let app = App {
         model: vault::Model::new(),
@@ -147,23 +150,41 @@ pub fn init() {
         ocr::pump(a);
         a.request_frame();
     });
-    start_model_poll();
     island::schedule_trim();
     start_screenshot_watcher();
 }
 
-/// VaultModel polls vault.json's modification date once a second.
-fn start_model_poll() {
-    ui::after(1.0, || {
-        with(|a| {
+static CHANGE_POSTED: AtomicBool = AtomicBool::new(false);
+static OCR_POSTED: AtomicBool = AtomicBool::new(false);
+
+/// The store changed (any thread): tell the UI once per burst. Items or
+/// folders reload the model if its generation moved; OCR text only
+/// re-filters an active search.
+fn store_changed(ocr: bool) {
+    let flag = if ocr { &OCR_POSTED } else { &CHANGE_POSTED };
+    if !flag.swap(true, Ordering::SeqCst) {
+        ui::post(move || store_changed_ui(ocr));
+    }
+}
+
+fn store_changed_ui(ocr: bool) {
+    // The app is only busy during a re-entrant message; try again next loop.
+    if APP.with(|a| a.try_borrow_mut().is_err()) {
+        ui::post(move || store_changed_ui(ocr));
+        return;
+    }
+    (if ocr { &OCR_POSTED } else { &CHANGE_POSTED }).store(false, Ordering::SeqCst);
+    with(|a| {
+        if ocr {
+            tray::ocr_changed(a);
+        } else {
             reload_model_if_changed(a);
-        });
-        start_model_poll();
+        }
     });
 }
 
 pub fn reload_model_if_changed(app: &mut App) {
-    if app.model.changed_on_disk() {
+    if app.model.changed() {
         app.model.reload(&[]);
         tray::model_changed(app);
         ocr::pump(app);
@@ -310,6 +331,18 @@ pub fn thumb_ready(key: String, raw: Option<Raw>) {
     }
     with(|a| {
         a.thumbs.insert(key, raw);
+        island::invalidate(a);
+    });
+}
+
+pub fn gif_ready(key: String, frames: crate::thumbs::GifFrames) {
+    let busy = APP.with(|a| a.try_borrow_mut().is_err());
+    if busy {
+        ui::post(move || gif_ready(key, frames));
+        return;
+    }
+    with(|a| {
+        a.thumbs.insert_gif(key, frames);
         island::invalidate(a);
     });
 }
@@ -615,6 +648,16 @@ fn build_settings_menu(app: &mut App) -> Menu {
     m.action_key("Capture Text from Screen", &ocr_label, || {
         ui::after(0.15, || ui::defer(screenocr::toggle_ocr));
     });
+    let mut card = Menu::new();
+    for (title, secs) in [("3 Seconds", 3u32), ("5 Seconds", 5), ("10 Seconds", 10), ("Until Closed", 0)] {
+        card.toggle(title, app.settings.shot_preview_seconds == secs, move || {
+            with(|a| {
+                a.settings.shot_preview_seconds = secs;
+                a.settings.save();
+            });
+        });
+    }
+    m.sub("Screenshot Preview", card);
     let mut shortcuts = Menu::new();
     for id in [hotkeys::SHOT, hotkeys::OCR] {
         let name = hotkeys::name(id);

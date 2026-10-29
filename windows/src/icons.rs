@@ -13,7 +13,7 @@ use windows::core::{Interface, PCWSTR};
 use windows_numerics::Matrix3x2;
 
 use crate::gfx::{Canvas, Gfx, PathB};
-use crate::theme::{Color, Pt, Weight, pt};
+use crate::theme::{Color, Pt, Rect, Weight, pt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
@@ -71,6 +71,12 @@ pub enum Icon {
     PauseFill,
     ForwardFill,
     BackwardFill,
+    /// arrow.down.right.and.arrow.up.left
+    ArrowsInward,
+    /// chevron.left.forwardslash.chevron.right
+    Code,
+    /// folder.badge.plus
+    FolderBadgePlus,
 }
 
 /// SF Symbols stroke weight as a fraction of the point size.
@@ -756,6 +762,33 @@ fn build(g: &Gfx, icon: Icon, size: f32, weight: Weight) -> Option<ID2D1Geometry
             gl.line(0.08, 0.08, 0.42, 0.42);
             gl.poly(&[(0.42, 0.14), (0.42, 0.42), (0.14, 0.42)], false);
         }
+        ArrowsInward => {
+            gl.line(-0.42, -0.42, -0.1, -0.1);
+            gl.poly(&[(-0.1, -0.36), (-0.1, -0.1), (-0.36, -0.1)], false);
+            gl.line(0.1, 0.1, 0.42, 0.42);
+            gl.poly(&[(0.1, 0.36), (0.1, 0.1), (0.36, 0.1)], false);
+        }
+        Code => {
+            gl.poly(&[(-0.24, -0.26), (-0.5, 0.0), (-0.24, 0.26)], false);
+            gl.poly(&[(0.24, -0.26), (0.5, 0.0), (0.24, 0.26)], false);
+            gl.line(0.1, -0.4, -0.1, 0.4);
+        }
+        FolderBadgePlus => {
+            let mut b = gl.path();
+            b.move_to(gl.p(0.0, 0.32));
+            b.line_to(gl.p(-0.56, 0.32));
+            b.line_to(gl.p(-0.56, -0.33));
+            b.quad_to(gl.p(-0.56, -0.42), gl.p(-0.47, -0.42));
+            b.line_to(gl.p(-0.2, -0.42));
+            b.quad_to(gl.p(-0.14, -0.42), gl.p(-0.1, -0.37));
+            b.line_to(gl.p(-0.04, -0.3));
+            b.line_to(gl.p(0.47, -0.3));
+            b.quad_to(gl.p(0.56, -0.3), gl.p(0.56, -0.21));
+            b.line_to(gl.p(0.56, -0.04));
+            gl.stroke(b);
+            gl.line(0.32, 0.06, 0.32, 0.5);
+            gl.line(0.1, 0.28, 0.54, 0.28);
+        }
         PlusMagnifyingGlass => {
             gl.magnifier(-0.09, -0.09, 0.34);
             gl.line(-0.24, -0.09, 0.06, -0.09);
@@ -850,4 +883,26 @@ pub fn rasterize(g: &Gfx, icon: Icon, px: u32, size_pt: f32, weight: Weight, col
 
 pub fn clear_cache() {
     CACHE.with(|m| m.borrow_mut().clear());
+}
+
+/// CheckShape (Island.swift) stroked inside `r`, drawn up to `t` (0…1) so it
+/// can "draw itself" like SwiftUI's `.trim(from: 0, to: t)`.
+pub fn check(cv: &mut Canvas, r: Rect, t: f32, width: f32, color: Color) {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return;
+    }
+    let a = pt(r.x, r.cy() + r.h * 0.05);
+    let b = pt(r.x + r.w * 0.36, r.b());
+    let c = pt(r.r(), r.y);
+    let l1 = a.dist(b);
+    let l2 = b.dist(c);
+    let len = (l1 + l2) * t;
+    let lerp = |p: Pt, q: Pt, k: f32| pt(p.x + (q.x - p.x) * k, p.y + (q.y - p.y) * k);
+    if len <= l1 {
+        cv.line(a, lerp(a, b, len / l1.max(0.001)), width, color, 1);
+    } else {
+        cv.line(a, b, width, color, 1);
+        cv.line(b, lerp(b, c, (len - l1) / l2.max(0.001)), width, color, 1);
+    }
 }

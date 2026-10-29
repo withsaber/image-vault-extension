@@ -182,7 +182,8 @@ impl History {
             }
             Kind::Image => {}
         }
-        self.bump(&item.hash);
+        // Copying a card leaves it where it is (copying the same thing again
+        // from another app still moves it to the top, via `add`).
     }
 
     pub fn delete(&mut self, id: &str) {

@@ -15,13 +15,13 @@ It has the same features, layout and motion as the Mac app (see [../mac/README.m
 | Vision OCR | Windows OCR (`Windows.Media.Ocr`) with the same layout pass |
 | MediaRemote | System Media Transport Controls (Spotify, browsers, Media Player…) |
 | Screen Recording permission | Not needed |
-| `~/Library/Application Support/ImageVault` | `%LOCALAPPDATA%\ImageVault` (same `vault.json` format) |
+| `~/Library/Application Support/ImageVault` | `%LOCALAPPDATA%\ImageVault` (same `vault.sqlite` schema and `images\` folder) |
 
 SF Symbols are Apple-only, so the icons are redrawn as vector paths in the same style. Windows has no hardware notch, so the island always draws its own.
 
-## Known issue
+## Not yet checked on Windows
 
-Dragging a screenshot's floating preview into WhatsApp, an AI chat or a web upload field doesn't drop. The likely cause is that the preview doesn't capture the mouse, so a quick drag leaves the small window before the drag starts. The proposed fix is `SetCapture` on press in `capture.rs`. It isn't applied yet; see `KNOWLEDGEBASE.md` §7.
+Version 2.3.0 was built and tested from a Mac (cross-compiled, with the storage layer tested against a throwaway vault). It hasn't been run on a Windows PC yet. Window, drag-and-drop, hotkey, thumbnail and GIF behaviour need a check there, including the fix for dragging a screenshot preview into WhatsApp or a web upload (`SetCapture` in `capture.rs`, see `KNOWLEDGEBASE.md` §7).
 
 ## OCR languages (Bangla, Hindi, Tamil…)
 
