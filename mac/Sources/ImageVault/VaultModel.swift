@@ -4,8 +4,8 @@ extension Notification.Name {
     static let vaultChanged = Notification.Name("ImageVault.vaultChanged")
 }
 
-/// UI-side view of the vault. Reloads when the index file changes on disk,
-/// which covers writes from this app and from the Chrome bridge process.
+/// UI-side view of the vault. Reloads when the store reports a change
+/// (`vaultStoreChanged`); OCR results don't change the grid, so they don't reload it.
 @MainActor
 final class VaultModel {
     static let shared = VaultModel()
@@ -17,26 +17,24 @@ final class VaultModel {
     private(set) var groupOf: [String: String] = [:]
     /// Ids added since the last reload, so tiles can play their entrance.
     private(set) var fresh: Set<String> = []
-    private var lastModified: Date?
-    private var timer: Timer?
+    private var generation = -1
 
     func start() {
         reload()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        NotificationCenter.default.addObserver(forName: .vaultStoreChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.reloadIfChanged() }
         }
     }
 
     func reloadIfChanged() {
-        let modified = VaultStore.shared.indexModified
-        if modified != lastModified { reload() }
+        if VaultStore.shared.generation != generation { reload() }
     }
 
     func reload(fresh newIDs: Set<String> = []) {
-        lastModified = VaultStore.shared.indexModified
         let old = Set(items.map(\.id))
         var seen = Set<String>()
-        let index = VaultStore.shared.load()
+        let (index, gen) = VaultStore.shared.snapshot()
+        generation = gen
         let next = index.items.filter { seen.insert($0.id).inserted }
         groups = index.groups ?? []
         groupOf = [:]

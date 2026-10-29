@@ -1,7 +1,7 @@
 # Image Vault — Project Knowledge Base
 
 Everything decided, built, learned and fixed across this project, in one place.
-Last updated: **2026-10-22**. See [Current state](#9-current-state-as-of-2026-10-22).
+Last updated: **2026-10-30**. See [Current state](#9-current-state-as-of-2026-10-29).
 
 ---
 
@@ -55,6 +55,7 @@ It now exists as three things:
 | **2026-10-22 updates** | Music strip: previous / play-pause / next buttons, and the waveform is display-only (no seeking). The island opens only when the pointer touches the very top screen edge. Done on Mac, then ported to Windows. |
 | **2026-10-29 second pass (Mac only)** | Screenshots auto-save to the vault (and later edits update that item), the 2×2 hover grid from your sketch, other images fade while a folder is open, the opening jitter fixed, and copying a clipboard card no longer moves it to the top. |
 | **2026-10-29 feedback pass (Mac only)** | One images folder (no per-image folders), folders/groups with the fly-out animation, live GIFs, SVG badges + Copy SVG Code, SVG code preview in Clipboard, Edit on every image, screenshot auto-copy + card timer (3/5/10 s/until closed) that closes after you use it, copy overlay animation, expandable clipboard cards, icon-only tabs, new select-all icon, Group replaces Text in the bulk bar. Not ported to Windows. |
+| **2026-10-30 storage pass (Mac only)** | The index moved from `vault.json` to SQLite (`vault.sqlite`) with FTS5 trigram search; OCR results save off the main thread without reloading the grid; thumbnails decode at 256 px with a 96 MB memory budget and a disk cache in `thumbs/`. `vault.json` is imported once and kept as `vault.json.pre-sqlite`. See §6.3. |
 
 ---
 
@@ -80,7 +81,7 @@ It now exists as three things:
 **Platforms**
 - Mac first; the Chrome extension is no longer used.
 - Windows: your native Rust port, delivered as one portable `.exe`.
-- **Change only the Mac app unless you explicitly ask for Windows.** A Windows bug in the same message is information, not a request to act ("if i tell you to build in the windows app, then you will do it").
+- ~~Change only the Mac app unless you explicitly ask for Windows.~~ **Replaced 2026-10-30:** every change lands on both platforms. Build it on one side first (usually the Mac), then port it to the other; record anything that can't be ported yet as a parity gap in §9. See `CLAUDE.md`.
 - Keep the Mac app's size and memory as they are (no slimming, 2026-10-22).
 
 **Opening the island (2026-10-22)**
@@ -209,8 +210,8 @@ The extension is kept for reference in `~/Downloads/image-vault-extension` (it i
 | `Island.swift` | `IslandModel`, `NotchShape`, `IslandView` (SwiftUI), header, search bar, bulk bar, `NowPlayingBar`, `TransportButton`, `WaveformProgress`, `IslandController` (window, hover, drag and drop, activity) |
 | `Tray.swift` | `TrayController` (NSCollectionView, diffable data source, filter and sort, copy, Copy Text, right-click menu, drag-out), `PreviewView`, `IconButton` |
 | `Tile.swift` | Tile layers: hover lift, selection ring and tuck, copy and Copy Text buttons, meta strip |
-| `VaultStore.swift` | `VaultItem` / `VaultIndex`, flock-protected JSON index, add/dedupe/delete/restore |
-| `VaultModel.swift` | UI model (polls `vault.json` modification time), undo, `ClipboardWatcher`, `ScreenshotWatcher` |
+| `VaultStore.swift` | `VaultItem` / `VaultGroup`, the SQLite index (`vault.sqlite`): add/dedupe/delete/restore, folders, OCR text, full-text search, the one-time `vault.json` import |
+| `VaultModel.swift` | UI model (reloads on `vaultStoreChanged`), undo, `ClipboardWatcher`, `ScreenshotWatcher` |
 | `Ingest.swift` | Reads drops and pasteboards (files → promises → image data → URLs); `Clipboard.copy` / `copyText` |
 | `Imaging.swift` | Format normalization, thumbnails, PNG for the clipboard |
 | `OCR.swift` | Vision OCR with layout, **Tesseract** fallback, `OCRIndexer` (auto-OCR) |
@@ -223,10 +224,17 @@ The extension is kept for reference in `~/Downloads/image-vault-extension` (it i
 
 ### 6.3 Data
 
-- **Location**: `~/Library/Application Support/ImageVault/vault.json` plus `images/<name>`: **one folder for every image** since 2026-10-29, names kept unique ("Shot.png", "Shot 2.png"). Override with the `IMAGEVAULT_ROOT` environment variable.
+- **Index (since 2026-10-30):** `~/Library/Application Support/ImageVault/vault.sqlite` (WAL mode), replacing `vault.json`, which was rewritten whole on every change. Tables: `items` (one row per image, same fields as before), `groups` + `group_items` (folder membership and order), `meta`, and `items_fts`, an FTS5 **trigram** index over name, domain, source, page title, URLs and OCR text, kept in sync by triggers.
+  - **Why:** measured at 10,000 images, an OCR save went from ~113 ms on the main thread (decode + re-encode + rewrite the whole JSON, then reload the grid) to 0.14 ms off it; search from ~18 ms per keystroke to ~1 ms; loading the grid takes ~5 ms.
+  - **Search:** `VaultStore.search` uses FTS for 3+ characters (case-insensitive substring, any script, Bangla included) and a `LIKE` scan for shorter needles. The UI model never loads OCR text; the tray caches each query's matching ids.
+  - **Changes:** writes bump `VaultStore.generation` and post `vaultStoreChanged` once per run loop; `VaultModel` reloads only if the generation moved. OCR saves post `vaultOCRChanged` instead, which only re-filters an active search. The 1 s file-polling timer and the flock (for the retired Chrome bridge) are gone.
+  - **Rule:** never insert into `items` with `OR REPLACE`: SQLite skips delete triggers for replaced rows, which would leave stale search entries. Edits use `UPDATE`.
+  - **Migration:** at first launch, `vault.json` is imported in one transaction and renamed `vault.json.pre-sqlite` (a corrupt one is copied to `vault.corrupt-<time>.json`). Tombstones were dropped (Chrome sync is retired).
+  - **Thumbnails:** decoded at 256 px (tiles are ~96 pt; was 420 px), memory cache capped at 96 MB by bytes (was 600 images, up to ~400 MB), and saved to `thumbs/<id>@<px>-<hash8>.jpg|png` so a relaunch doesn't decode every original. The content hash in the name makes edited images regenerate; deleting or editing an image removes its thumbnails.
+- **Location**: `~/Library/Application Support/ImageVault/vault.sqlite` plus `images/<name>`: **one folder for every image** since 2026-10-29, names kept unique ("Shot.png", "Shot 2.png"). Override with the `IMAGEVAULT_ROOT` environment variable.
 - **Migration:** `VaultStore.migrateToFlatLayout()` runs at launch and moves old `images/<id>/<name>` files into `images/`, renaming on clashes and deleting the empty per-image folders. `fileURL(for:)` still falls back to the old path if a file wasn't moved. A pre-migration copy of your vault is at `~/Library/Application Support/ImageVault-backup-2026-10-29`.
 - **Windows divergence:** the Rust app still writes `images/<id>/<name>`. The two vaults are on different machines, so nothing breaks, but the layouts are no longer identical.
-- **Groups (folders):** `vault.json` has an optional `groups` array: `{id: "grp_…", name, itemIDs, created}`. Membership only; files stay in `images/`. An image belongs to at most one group. `VaultModel.groups` / `groupOf` mirror it. Deleting an image keeps its id in the group until the undo window ends (`purgeFiles` prunes it), so ⌘Z puts it back in its folder.
+- **Groups (folders):** the `groups` and `group_items` tables (before 2026-10-30: an optional `groups` array in `vault.json`, `{id: "grp_…", name, itemIDs, created}`, which Windows still uses). Membership only; files stay in `images/`. An image belongs to at most one group. `VaultModel.groups` / `groupOf` mirror it. Deleting an image keeps its id in the group until the undo window ends (`purgeFiles` prunes it), so ⌘Z puts it back in its folder.
 - **`VaultItem` fields**: id, name, mime, bytes, width, height, hash (first 16 bytes of SHA-256, hex), url, pageTitle, pageUrl, domain, timestamp (ms), source, `ocrText`, `ocrVersion`, `ocrLanguages`.
 - **Formats**: AVIF, WebP, HEIC, TIFF and BMP are re-encoded on save. Opaque images become JPEG (quality 0.94), the rest PNG.
 
@@ -442,7 +450,12 @@ You rewrote it in **Rust** around 2026-10-20, replacing the earlier C#/WPF port.
 - **2026-10-22:** the same two Mac changes were ported and cross-compiled clean. `dist/ImageVault.exe` was updated, but it hasn't been run yet: there's no Windows PC available right now.
 - **Open:** the screenshot preview won't drop into WhatsApp, AI chats or web upload fields. Likely cause and proposed fix are in §7. You asked to leave it for now.
 
-**Pending documentation:** none. This file and `mac/README.md` are current as of 2026-10-29.
+**Storage pass, 2026-10-30 (Mac, built and tested, not installed):** SQLite index, FTS search, off-main OCR saves and the thumbnail fixes (§6.3). A test harness against a throwaway vault passed 42 checks (import, search incl. Bangla, dedupe, OCR, folders, delete/undo/purge, edit, thumbnails, 10,000-image timings), and `--snapshot` rendered every state from a migrated vault. Not yet run against a real vault in daily use; the first launch will migrate it.
+
+**Parity gaps**
+- **Storage pass (2026-10-30), Mac only.** Windows keeps `vault.json` and its own thumbnail code. Reason: the Windows port of the 2026-10-29 features was in progress on `vault.json` when the Mac moved to SQLite, and the two vaults live on different machines, so nothing breaks. To close it: give Windows the same `vault.sqlite` schema (`rusqlite`, FTS5 trigram, same tables and triggers as §6.3) with a one-time `vault.json` import, or move storage into a shared Rust core used by both apps.
+
+**Pending documentation:** none. This file and `mac/README.md` are current as of 2026-10-30.
 
 ## 10. Bug log
 

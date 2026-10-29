@@ -316,27 +316,26 @@ final class OCRIndexer {
     /// gets re-read with the new set.
     func reindexAll() { pump() }
 
+    /// Reads and saves one image at a time, entirely off the main thread: the
+    /// result is one SQLite row update, and the grid doesn't reload for it.
     private func pump() {
         guard !running else { return }
-        let pending = VaultModel.shared.items.filter { (($0.ocrVersion ?? 0) < Self.version) || ($0.ocrLanguages ?? "") != languageKey }
-        guard let next = pending.first else { return }
         running = true
-        let url = VaultStore.shared.fileURL(for: next)
         let key = languageKey
+        let version = Self.version
         Task.detached(priority: .utility) {
-            let text = FileManager.default.fileExists(atPath: url.path) ? OCR.indexText(at: url) : ""
-            await MainActor.run {
-                VaultStore.shared.mutate { index in
-                    if let i = index.items.firstIndex(where: { $0.id == next.id }) {
-                        index.items[i].ocrText = text.isEmpty ? nil : text
-                        index.items[i].ocrVersion = Self.version
-                        index.items[i].ocrLanguages = key
-                    }
+            let store = VaultStore.shared
+            if let next = store.nextPendingOCR(version: version, languages: key) {
+                let url = store.fileURL(for: next)
+                let text = FileManager.default.fileExists(atPath: url.path) ? OCR.indexText(at: url) : ""
+                store.setOCR(id: next.id, text: text.isEmpty ? nil : text, version: version, languages: key)
+                await MainActor.run {
+                    self.running = false
+                    // Give the machine a breath between images.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.pump() }
                 }
-                self.running = false
-                VaultModel.shared.reloadIfChanged()
-                // Give the UI a breath between images.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.pump() }
+            } else {
+                await MainActor.run { self.running = false }
             }
         }
     }

@@ -7,7 +7,7 @@ A pure black-and-white image vault that lives in a Dynamic-Island-style notch at
 | [`mac/`](mac/README.md) | macOS app in Swift (SwiftUI + AppKit). This is the reference design. |
 | [`windows/`](windows/README.md) | Windows app in Rust (Win32 + Direct2D + DirectComposition), a native port of the Mac app |
 
-Both apps use `vault.json`. The Mac app keeps every image in one `images/` folder (since 2026-10-29); the Windows app still uses `images/<id>/<name>`.
+Images are plain files in an `images/` folder. The Mac app indexes them in SQLite (`vault.sqlite`, with full-text search over names and OCR text, since 2026-10-30) and keeps every image in one folder; the Windows app uses `vault.json`.
 
 The island opens when the pointer touches the very top edge of the screen above it (or with Ctrl+Alt+V / ⌃⌥V).
 

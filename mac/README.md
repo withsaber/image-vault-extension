@@ -61,7 +61,7 @@ The editor's toolbar has Copy, Save to Vault and Pin, a drag handle, then the to
 
 Apple Vision reads about 30 languages, including English, Chinese, Japanese, Korean, Arabic, Russian, Thai, Vietnamese and most of Europe. It doesn't read Bangla, Hindi, Tamil, Urdu or most South Asian scripts, so the app bundles Tesseract 5.5.3 for those: Bangla, Hindi, Urdu, Tamil, Telugu, Marathi, Nepali, Gujarati, Punjabi, Malayalam, Kannada and Sinhala. Both engines run on each image. Tesseract's result wins when it contains a meaningful share of those scripts; otherwise Vision's does. The search index stores both, so a search matches either.
 
-Images are stored as normal files in `~/Library/Application Support/ImageVault/images/`. AVIF, WebP, HEIC and TIFF are converted to PNG or JPEG on save, so every app accepts them.
+Images are stored as normal files in `~/Library/Application Support/ImageVault/images/`, indexed in `vault.sqlite` next to it (SQLite with full-text search over names, sites and OCR text; older `vault.json` indexes are imported on first launch and kept as `vault.json.pre-sqlite`). Grid thumbnails are cached in `thumbs/`. AVIF, WebP, HEIC and TIFF are converted to PNG or JPEG on save, so every app accepts them.
 
 ### How Now Playing works
 
@@ -73,7 +73,7 @@ macOS has no public API for reading another app's now-playing item. Since macOS 
 
 ## Building
 
-You need Swift 5.9+; the Xcode Command Line Tools are enough.
+You need Swift 5.9+; the Xcode Command Line Tools are enough. Without full Xcode, the macOS 27 SDK can't expand SwiftUI's `@State` macro, so `sdk.sh` (used by both scripts) builds against the newest macOS 26 SDK instead.
 
 ```bash
 ./build.sh
@@ -82,6 +82,12 @@ You need Swift 5.9+; the Xcode Command Line Tools are enough.
 On the first run, `setup-signing.sh` creates a local self-signed certificate ("Image Vault Local Signing") in its own keychain at `~/.imagevault-signing`. Every build is signed with it, so macOS keeps Screen Recording permission across rebuilds. Without it, the build falls back to ad-hoc signing.
 
 This builds a release binary, wraps it in `Image Vault.app`, bundles Tesseract (`Vendor/tesseract`) and the artwork helper, signs it all, installs it to `/Applications` (or `~/Applications`), and launches it.
+
+To make a release signed with your Apple Developer ID, notarized and packaged as a DMG in `dist/`, see the setup notes at the top of `release.sh`, then:
+
+```bash
+./release.sh
+```
 
 To render every island state to PNGs off-screen, using a throwaway vault, for design checks:
 

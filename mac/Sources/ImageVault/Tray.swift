@@ -305,6 +305,8 @@ final class TrayController: NSViewController, NSCollectionViewDelegate {
     private let preview = PreviewView()
     private(set) var isDraggingOut = false
     private var query = ""
+    /// Search result for `query`, dropped whenever items or OCR text change.
+    private var matchCache: (query: String, ids: Set<String>?)?
     private var sortOrder: SortOrder = .newest
     /// Folder id → how many of its images are out in the grid right now.
     private var outCount: [String: Int] = [:]
@@ -411,7 +413,18 @@ final class TrayController: NSViewController, NSCollectionViewDelegate {
         ])
 
         NotificationCenter.default.addObserver(forName: .vaultChanged, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applySnapshot() }
+            MainActor.assumeIsolated {
+                self?.matchCache = nil
+                self?.applySnapshot()
+            }
+        }
+        // New OCR text can change what a search matches; nothing else shows it.
+        NotificationCenter.default.addObserver(forName: .vaultOCRChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.matchCache = nil
+                if self.searching { self.applySnapshot() }
+            }
         }
         applySnapshot()
     }
@@ -494,13 +507,11 @@ final class TrayController: NSViewController, NSCollectionViewDelegate {
     }
 
     private func filteredSorted(_ source: [VaultItem]) -> [VaultItem] {
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var items = source
-        if !needle.isEmpty {
-            items = items.filter { item in
-                let fields = [item.name, item.domain, item.source, item.pageTitle, item.url, item.pageUrl, item.ocrText]
-                return fields.contains { ($0 ?? "").lowercased().contains(needle) }
-            }
+        // Name, site, source and OCR text, matched in SQLite (full-text index).
+        if matchCache?.query != query { matchCache = (query, VaultStore.shared.search(query)) }
+        if let matches = matchCache?.ids {
+            items = items.filter { matches.contains($0.id) }
         }
         switch sortOrder {
         case .newest:
@@ -806,13 +817,7 @@ final class TrayController: NSViewController, NSCollectionViewDelegate {
                 if let text = await OCR.text(at: VaultStore.shared.fileURL(for: item)) {
                     chunks.append(text)
                     // Store OCR text in vault for future search
-                    await MainActor.run {
-                        VaultStore.shared.mutate { index in
-                            if let i = index.items.firstIndex(where: { $0.id == item.id }) {
-                                index.items[i].ocrText = text
-                            }
-                        }
-                    }
+                    VaultStore.shared.setOCR(id: item.id, text: text)
                 }
             }
             guard let self else { return }

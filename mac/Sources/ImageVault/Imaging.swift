@@ -150,27 +150,69 @@ enum Imaging {
     }
 }
 
-/// Shared in-memory thumbnail cache; decoding runs off the main thread.
-final class Thumbnails {
+/// Shared thumbnail cache: memory first, then small files in `thumbs/`, then
+/// the original. Decoding runs off the main thread.
+///
+/// Grid tiles are ~96 pt, so 256 px covers them on Retina; decoding big
+/// screenshots at that size (not 420 px) needs ~2.7× less memory per tile.
+/// The memory cache is capped by bytes, not count. The disk copies make the
+/// tray open instantly after a relaunch instead of decoding every original.
+final class Thumbnails: @unchecked Sendable {
     static let shared = Thumbnails()
+    static let gridPixel = 256
     private let cache = NSCache<NSString, CGImage>()
     private let queue = DispatchQueue(label: "imagevault.thumbs", qos: .userInitiated, attributes: .concurrent)
+    private var dir: URL { VaultStore.shared.thumbsURL }
 
-    init() { cache.countLimit = 600 }
-
-    /// Drops cached thumbnails of an image whose pixels changed.
-    func forget(_ id: String) {
-        for size in [40, 88, 160, 420] { cache.removeObject(forKey: "\(id)@\(size)" as NSString) }
+    init() {
+        cache.totalCostLimit = 96 * 1024 * 1024
+        cache.countLimit = 1000
     }
 
-    func load(_ item: VaultItem, maxPixel: Int = 420, completion: @escaping (CGImage?) -> Void) {
+    /// Drops cached thumbnails of an image whose pixels changed or that's gone.
+    func forget(_ id: String) {
+        for size in [40, 88, 160, Self.gridPixel] { cache.removeObject(forKey: "\(id)@\(size)" as NSString) }
+        let prefix = id + "@"
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+        }
+    }
+
+    func load(_ item: VaultItem, maxPixel: Int = Thumbnails.gridPixel, completion: @escaping (CGImage?) -> Void) {
         let key = "\(item.id)@\(maxPixel)" as NSString
         if let hit = cache.object(forKey: key) { return completion(hit) }
         let url = VaultStore.shared.fileURL(for: item)
+        // The content hash in the name means an edited image never shows a stale thumbnail.
+        let file = dir.appendingPathComponent("\(item.id)@\(maxPixel)-\(item.hash?.prefix(8) ?? "x")")
         queue.async { [cache] in
-            let image = Imaging.thumbnail(at: url, maxPixel: maxPixel)
-            if let image { cache.setObject(image, forKey: key) }
+            var image = Self.readCached(file)
+            if image == nil {
+                image = Imaging.thumbnail(at: url, maxPixel: maxPixel)
+                if let image { Self.writeCached(image, to: file) }
+            }
+            if let image { cache.setObject(image, forKey: key, cost: image.bytesPerRow * image.height) }
             DispatchQueue.main.async { completion(image) }
         }
+    }
+
+    private static func readCached(_ base: URL) -> CGImage? {
+        for ext in ["jpg", "png"] {
+            let url = base.appendingPathExtension(ext)
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let image = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+            else { continue }
+            return image
+        }
+        return nil
+    }
+
+    /// JPEG when the thumbnail has no transparency (small), PNG otherwise.
+    private static func writeCached(_ image: CGImage, to base: URL) {
+        let opaque = [.none, .noneSkipFirst, .noneSkipLast].contains(image.alphaInfo)
+        let url = base.appendingPathExtension(opaque ? "jpg" : "png")
+        let type = (opaque ? UTType.jpeg : UTType.png).identifier as CFString
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        CGImageDestinationFinalize(dest)
     }
 }

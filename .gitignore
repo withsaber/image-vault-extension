@@ -11,3 +11,6 @@ windows-rs/
 
 # Windows build output (made by build.cmd)
 windows/dist/
+
+# Release output (made by mac/release.sh)
+mac/dist/

@@ -16,6 +16,7 @@ else
 fi
 sign() { codesign --force --timestamp=none --sign "$SIGN_ID" "$@" >/dev/null 2>&1; }
 
+source ./sdk.sh
 SCRATCH="${TMPDIR:-/tmp/}image-vault-mac-build"
 swift build -c release --scratch-path "$SCRATCH"
 BIN="$SCRATCH/release/ImageVault"
@@ -26,7 +27,8 @@ mkdir -p "$DEST"
 APP="$DEST/Image Vault.app"
 
 # Quit a running copy so the binary can be replaced.
-osascript -e 'tell application id "com.imagevault.mac" to quit' >/dev/null 2>&1 || true
+BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' Resources/Info.plist)"
+osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
 pkill -x ImageVault >/dev/null 2>&1 || true
 
 rm -rf "$APP"
@@ -37,6 +39,7 @@ cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # Bundled Tesseract (Bangla and other scripts Vision can't read).
 cp -R Vendor/tesseract "$APP/Contents/Resources/tesseract"
+chmod +x "$APP/Contents/Resources/tesseract/bin/tesseract"  # git may drop the bit
 
 # Now-playing artwork helper, loaded into /usr/bin/perl (universal like perl).
 clang -dynamiclib -O2 -arch arm64 -arch x86_64 -mmacosx-version-min=13.0 \
