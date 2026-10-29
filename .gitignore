@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Swift build output
+mac/.build/
+*.app
+
+# Rust build output
+target/
+windows-rs/
+
+# Windows build output (made by build.cmd)
+windows/dist/
